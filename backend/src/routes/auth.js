@@ -1,492 +1,636 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { body, validationResult } = require('express-validator');
-const User = require('../models/User');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const multer = require('multer');
+const { User } = require('../models/User');
 const auth = require('../middleware/auth');
+const upload = require('../middleware/upload');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
 // Generate JWT token
 const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
-  });
+  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
 };
 
-// @route   POST /api/auth/register
-// @desc    Register a new user
-// @access  Public
-router.post('/register', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }),
-  body('name').trim().isLength({ min: 2 }),
-  body('age').optional().isInt({ min: 18, max: 100 })
-], async (req, res) => {
+// Generate verification token
+const generateVerificationToken = () => {
+  return crypto.randomBytes(32).toString('hex');
+};
+
+/**
+ * @route   POST /api/auth/register
+ * @desc    Register a new user
+ * @access  Public
+ */
+router.post('/register', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
-      });
-    }
-
-    const { email, password, name, age, gender, nationality } = req.body;
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: 'User already exists with this email'
-      });
-    }
-
-    // Create new user
-    const user = new User({
+    const {
       email,
       password,
-      name,
-      age,
-      gender,
-      nationality
+      firstName,
+      lastName,
+      phone,
+      dateOfBirth,
+      nationality,
+      gender
+    } = req.body;
+
+    // Validation
+    if (!email || !password || !firstName || !lastName) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'Email, password, first name, and last name are required'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({
+      $or: [{ email }, { phone }]
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        error: 'User already exists',
+        message: 'A user with this email or phone number already exists'
+      });
+    }
+
+    // Hash password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Generate verification token
+    const verificationToken = generateVerificationToken();
+
+    // Create user
+    const user = new User({
+      email,
+      password: hashedPassword,
+      profile: {
+        firstName,
+        lastName,
+        phone,
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
+        nationality,
+        gender
+      },
+      verification: {
+        email: {
+          token: verificationToken,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
+        }
+      }
     });
 
     await user.save();
 
-    // Generate token
+    // Generate JWT token
     const token = generateToken(user._id);
+
+    // Remove sensitive data from response
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.verification;
 
     logger.info(`New user registered: ${email}`);
 
     res.status(201).json({
-      success: true,
       message: 'User registered successfully',
-      data: {
-        token,
-        user: user.getPublicProfile()
-      }
+      token,
+      user: userResponse,
+      verificationRequired: true
     });
 
   } catch (error) {
     logger.error('Registration error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error during registration'
+      error: 'Registration failed',
+      message: 'An error occurred during registration'
     });
   }
 });
 
-// @route   POST /api/auth/login
-// @desc    Login user
-// @access  Public
-router.post('/login', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').exists()
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/login
+ * @desc    Login user
+ * @access  Public
+ */
+router.post('/login', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
-      });
-    }
-
     const { email, password } = req.body;
 
-    // Find user by email
-    const user = await User.findOne({ email });
+    if (!email || !password) {
+      return res.status(400).json({
+        error: 'Missing credentials',
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find user
+    const user = await User.findOne({ email }).select('+password');
     if (!user) {
       return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
+        error: 'Invalid credentials',
+        message: 'Invalid email or password'
       });
     }
 
-    // Check if account is suspended
-    if (user.isSuspended) {
-      return res.status(403).json({
-        success: false,
-        message: 'Account is suspended',
-        reason: user.suspensionReason
-      });
-    }
-
-    // Verify password
-    const isPasswordValid = await user.comparePassword(password);
+    // Check password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
+        error: 'Invalid credentials',
+        message: 'Invalid email or password'
       });
     }
 
-    // Update last active
-    user.lastActive = new Date();
+    // Check if account is active
+    if (!user.isActive) {
+      return res.status(401).json({
+        error: 'Account deactivated',
+        message: 'Your account has been deactivated. Please contact support.'
+      });
+    }
+
+    // Update last login
+    user.lastLogin = new Date();
     await user.save();
 
     // Generate token
     const token = generateToken(user._id);
 
+    // Remove sensitive data
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.verification;
+
     logger.info(`User logged in: ${email}`);
 
     res.json({
-      success: true,
       message: 'Login successful',
-      data: {
-        token,
-        user: user.getPublicProfile()
-      }
+      token,
+      user: userResponse
     });
 
   } catch (error) {
     logger.error('Login error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error during login'
+      error: 'Login failed',
+      message: 'An error occurred during login'
     });
   }
 });
 
-// @route   POST /api/auth/google
-// @desc    Google OAuth login
-// @access  Public
-router.post('/google', [
-  body('googleToken').exists(),
-  body('email').isEmail().normalizeEmail(),
-  body('name').exists()
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/verify-email
+ * @desc    Verify email address
+ * @access  Public
+ */
+router.post('/verify-email', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
+    const { token } = req.body;
+
+    if (!token) {
       return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
+        error: 'Missing token',
+        message: 'Verification token is required'
       });
     }
 
-    const { googleToken, email, name, picture } = req.body;
+    // Find user with verification token
+    const user = await User.findOne({
+      'verification.email.token': token,
+      'verification.email.expiresAt': { $gt: new Date() }
+    });
 
-    // TODO: Verify Google token with Google API
-    // For now, we'll trust the client-side verification
-
-    let user = await User.findOne({ email });
-
-    if (user) {
-      // Update Google auth info
-      user.socialAuth.google = {
-        id: googleToken,
-        email: email
-      };
-      if (picture && !user.profilePicture) {
-        user.profilePicture = picture;
-      }
-    } else {
-      // Create new user
-      user = new User({
-        email,
-        name,
-        profilePicture: picture,
-        socialAuth: {
-          google: {
-            id: googleToken,
-            email: email
-          }
-        },
-        isVerified: true, // Google accounts are considered verified
-        verificationMethod: 'social-verification'
+    if (!user) {
+      return res.status(400).json({
+        error: 'Invalid token',
+        message: 'Invalid or expired verification token'
       });
     }
 
-    user.lastActive = new Date();
+    // Mark email as verified
+    user.verification.email.isVerified = true;
+    user.verification.email.verifiedAt = new Date();
+    user.verification.email.token = undefined;
+    user.verification.email.expiresAt = undefined;
+
     await user.save();
 
-    const token = generateToken(user._id);
-
-    logger.info(`Google OAuth login: ${email}`);
+    logger.info(`Email verified for user: ${user.email}`);
 
     res.json({
-      success: true,
-      message: 'Google login successful',
-      data: {
-        token,
-        user: user.getPublicProfile()
-      }
+      message: 'Email verified successfully'
     });
 
   } catch (error) {
-    logger.error('Google OAuth error:', error);
+    logger.error('Email verification error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error during Google login'
+      error: 'Verification failed',
+      message: 'An error occurred during email verification'
     });
   }
 });
 
-// @route   POST /api/auth/facebook
-// @desc    Facebook OAuth login
-// @access  Public
-router.post('/facebook', [
-  body('facebookToken').exists(),
-  body('email').isEmail().normalizeEmail(),
-  body('name').exists()
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/resend-verification
+ * @desc    Resend email verification
+ * @access  Private
+ */
+router.post('/resend-verification', auth, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
+    const user = await User.findById(req.user.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        error: 'User not found',
+        message: 'User account not found'
+      });
+    }
+
+    if (user.verification.email.isVerified) {
       return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
+        error: 'Already verified',
+        message: 'Email is already verified'
       });
     }
 
-    const { facebookToken, email, name, picture } = req.body;
+    // Generate new verification token
+    const verificationToken = generateVerificationToken();
+    user.verification.email.token = verificationToken;
+    user.verification.email.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    // TODO: Verify Facebook token with Facebook API
-
-    let user = await User.findOne({ email });
-
-    if (user) {
-      // Update Facebook auth info
-      user.socialAuth.facebook = {
-        id: facebookToken,
-        email: email
-      };
-      if (picture && !user.profilePicture) {
-        user.profilePicture = picture;
-      }
-    } else {
-      // Create new user
-      user = new User({
-        email,
-        name,
-        profilePicture: picture,
-        socialAuth: {
-          facebook: {
-            id: facebookToken,
-            email: email
-          }
-        },
-        isVerified: true,
-        verificationMethod: 'social-verification'
-      });
-    }
-
-    user.lastActive = new Date();
     await user.save();
 
-    const token = generateToken(user._id);
-
-    logger.info(`Facebook OAuth login: ${email}`);
+    // TODO: Send verification email
+    logger.info(`Verification email resent to: ${user.email}`);
 
     res.json({
-      success: true,
-      message: 'Facebook login successful',
-      data: {
-        token,
-        user: user.getPublicProfile()
-      }
+      message: 'Verification email sent successfully'
     });
 
   } catch (error) {
-    logger.error('Facebook OAuth error:', error);
+    logger.error('Resend verification error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error during Facebook login'
+      error: 'Failed to resend verification',
+      message: 'An error occurred while resending verification email'
     });
   }
 });
 
-// @route   POST /api/auth/forgot-password
-// @desc    Send password reset email
-// @access  Public
-router.post('/forgot-password', [
-  body('email').isEmail().normalizeEmail()
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/forgot-password
+ * @desc    Request password reset
+ * @access  Public
+ */
+router.post('/forgot-password', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
-      });
-    }
-
     const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        error: 'Missing email',
+        message: 'Email is required'
+      });
+    }
 
     const user = await User.findOne({ email });
     if (!user) {
       // Don't reveal if email exists or not
       return res.json({
-        success: true,
         message: 'If an account with that email exists, a password reset link has been sent'
       });
     }
 
-    // TODO: Generate reset token and send email
-    // For now, just log the action
+    // Generate reset token
+    const resetToken = generateVerificationToken();
+    user.verification.passwordReset = {
+      token: resetToken,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000) // 1 hour
+    };
+
+    await user.save();
+
+    // TODO: Send password reset email
     logger.info(`Password reset requested for: ${email}`);
 
     res.json({
-      success: true,
       message: 'If an account with that email exists, a password reset link has been sent'
     });
 
   } catch (error) {
     logger.error('Forgot password error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error'
+      error: 'Request failed',
+      message: 'An error occurred while processing your request'
     });
   }
 });
 
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
+/**
+ * @route   POST /api/auth/reset-password
+ * @desc    Reset password with token
+ * @access  Public
+ */
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({
+        error: 'Missing data',
+        message: 'Token and new password are required'
+      });
+    }
+
+    // Find user with reset token
+    const user = await User.findOne({
+      'verification.passwordReset.token': token,
+      'verification.passwordReset.expiresAt': { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        error: 'Invalid token',
+        message: 'Invalid or expired reset token'
+      });
+    }
+
+    // Hash new password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update password and clear reset token
+    user.password = hashedPassword;
+    user.verification.passwordReset = undefined;
+
+    await user.save();
+
+    logger.info(`Password reset completed for user: ${user.email}`);
+
+    res.json({
+      message: 'Password reset successfully'
+    });
+
+  } catch (error) {
+    logger.error('Reset password error:', error);
+    res.status(500).json({
+      error: 'Reset failed',
+      message: 'An error occurred while resetting password'
+    });
+  }
+});
+
+/**
+ * @route   POST /api/auth/change-password
+ * @desc    Change password (authenticated user)
+ * @access  Private
+ */
+router.post('/change-password', auth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        error: 'Missing data',
+        message: 'Current password and new password are required'
+      });
+    }
+
+    const user = await User.findById(req.user.userId).select('+password');
+    if (!user) {
+      return res.status(404).json({
+        error: 'User not found',
+        message: 'User account not found'
+      });
+    }
+
+    // Verify current password
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({
+        error: 'Invalid password',
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Hash new password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    user.password = hashedPassword;
+    await user.save();
+
+    logger.info(`Password changed for user: ${user.email}`);
+
+    res.json({
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    logger.error('Change password error:', error);
+    res.status(500).json({
+      error: 'Change failed',
+      message: 'An error occurred while changing password'
+    });
+  }
+});
+
+/**
+ * @route   POST /api/auth/upload-id
+ * @desc    Upload identity verification document
+ * @access  Private
+ */
+router.post('/upload-id', auth, upload.single('idDocument'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'No file uploaded',
+        message: 'Identity document is required'
+      });
+    }
+
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({
+        error: 'User not found',
+        message: 'User account not found'
+      });
+    }
+
+    // Store document information
+    user.verification.identity = {
+      documentType: req.body.documentType || 'passport',
+      documentUrl: req.file.path,
+      uploadedAt: new Date(),
+      status: 'pending'
+    };
+
+    await user.save();
+
+    logger.info(`Identity document uploaded for user: ${user.email}`);
+
+    res.json({
+      message: 'Identity document uploaded successfully',
+      status: 'pending_verification'
+    });
+
+  } catch (error) {
+    logger.error('ID upload error:', error);
+    res.status(500).json({
+      error: 'Upload failed',
+      message: 'An error occurred while uploading document'
+    });
+  }
+});
+
+/**
+ * @route   GET /api/auth/me
+ * @desc    Get current user profile
+ * @access  Private
+ */
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.userId);
     if (!user) {
       return res.status(404).json({
-        success: false,
-        message: 'User not found'
+        error: 'User not found',
+        message: 'User account not found'
       });
     }
 
+    const userResponse = user.toObject();
+    delete userResponse.password;
+
     res.json({
-      success: true,
-      data: {
-        user: user.getPublicProfile()
-      }
+      user: userResponse
     });
 
   } catch (error) {
-    logger.error('Get current user error:', error);
+    logger.error('Get profile error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error'
+      error: 'Failed to get profile',
+      message: 'An error occurred while fetching profile'
     });
   }
 });
 
-// @route   POST /api/auth/refresh-token
-// @desc    Refresh JWT token
-// @access  Private
-router.post('/refresh-token', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    const token = generateToken(user._id);
-
-    res.json({
-      success: true,
-      data: {
-        token
-      }
-    });
-
-  } catch (error) {
-    logger.error('Refresh token error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// @route   POST /api/auth/logout
-// @desc    Logout user (client-side token removal)
-// @access  Private
+/**
+ * @route   POST /api/auth/logout
+ * @desc    Logout user (invalidate token)
+ * @access  Private
+ */
 router.post('/logout', auth, async (req, res) => {
   try {
-    // Update last active time
-    await User.findByIdAndUpdate(req.user.userId, {
-      lastActive: new Date()
-    });
-
+    // In a production app, you might want to maintain a blacklist of tokens
+    // For now, we'll just return success as the client should remove the token
+    
     logger.info(`User logged out: ${req.user.userId}`);
 
     res.json({
-      success: true,
       message: 'Logged out successfully'
     });
 
   } catch (error) {
     logger.error('Logout error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error'
+      error: 'Logout failed',
+      message: 'An error occurred during logout'
     });
   }
 });
 
-// @route   DELETE /api/auth/account
-// @desc    Delete user account
-// @access  Private
-router.delete('/account', auth, [
-  body('password').exists()
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/social-login
+ * @desc    Social media login (Google, Facebook)
+ * @access  Public
+ */
+router.post('/social-login', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
+    const { provider, accessToken, profile } = req.body;
+
+    if (!provider || !accessToken || !profile) {
       return res.status(400).json({
-        success: false,
-        message: 'Validation errors',
-        errors: errors.array()
+        error: 'Missing data',
+        message: 'Provider, access token, and profile are required'
       });
     }
 
-    const { password } = req.body;
+    // TODO: Verify token with social provider
+    // For now, we'll trust the client-side verification
 
-    const user = await User.findById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
+    const { email, firstName, lastName, picture } = profile;
 
-    // Verify password for security
-    if (user.password) {
-      const isPasswordValid = await user.comparePassword(password);
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid password'
-        });
+    // Check if user exists
+    let user = await User.findOne({ email });
+
+    if (user) {
+      // Update social login info
+      user.socialLogins = user.socialLogins || {};
+      user.socialLogins[provider] = {
+        id: profile.id,
+        accessToken,
+        lastLogin: new Date()
+      };
+      
+      if (picture && !user.profile.profilePicture) {
+        user.profile.profilePicture = picture;
       }
+
+      user.lastLogin = new Date();
+      await user.save();
+    } else {
+      // Create new user
+      user = new User({
+        email,
+        profile: {
+          firstName,
+          lastName,
+          profilePicture: picture
+        },
+        socialLogins: {
+          [provider]: {
+            id: profile.id,
+            accessToken,
+            lastLogin: new Date()
+          }
+        },
+        verification: {
+          email: {
+            isVerified: true, // Trust social provider verification
+            verifiedAt: new Date()
+          }
+        }
+      });
+
+      await user.save();
     }
 
-    // TODO: Clean up user data, trips, etc.
-    await User.findByIdAndDelete(req.user.userId);
+    // Generate JWT token
+    const token = generateToken(user._id);
 
-    logger.info(`User account deleted: ${user.email}`);
+    // Remove sensitive data
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.socialLogins;
+
+    logger.info(`Social login successful: ${email} via ${provider}`);
 
     res.json({
-      success: true,
-      message: 'Account deleted successfully'
+      message: 'Social login successful',
+      token,
+      user: userResponse
     });
 
   } catch (error) {
-    logger.error('Delete account error:', error);
+    logger.error('Social login error:', error);
     res.status(500).json({
-      success: false,
-      message: 'Server error'
+      error: 'Social login failed',
+      message: 'An error occurred during social login'
     });
   }
 });
