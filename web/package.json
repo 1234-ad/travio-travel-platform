@@ -1,44 +1,40 @@
 {
   "name": "travio-web",
   "version": "1.0.0",
-  "description": "Travio web dashboard - React frontend",
+  "description": "Travio web dashboard - React application",
   "private": true,
   "dependencies": {
-    "@testing-library/jest-dom": "^5.16.5",
-    "@testing-library/react": "^13.4.0",
-    "@testing-library/user-event": "^14.4.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-router-dom": "^6.15.0",
     "react-scripts": "5.0.1",
-    "react-router-dom": "^6.14.2",
-    "axios": "^1.4.0",
-    "socket.io-client": "^4.7.2",
     "@mui/material": "^5.14.5",
     "@mui/icons-material": "^5.14.3",
+    "@mui/lab": "^5.0.0-alpha.140",
     "@emotion/react": "^11.11.1",
     "@emotion/styled": "^11.11.0",
-    "@mui/x-date-pickers": "^6.10.2",
-    "dayjs": "^1.11.9",
-    "react-hook-form": "^7.45.4",
+    "@reduxjs/toolkit": "^1.9.5",
+    "react-redux": "^8.1.2",
+    "redux-persist": "^6.0.0",
+    "axios": "^1.5.0",
+    "socket.io-client": "^4.7.2",
     "react-query": "^3.39.3",
+    "formik": "^2.4.3",
+    "yup": "^1.2.0",
+    "date-fns": "^2.30.0",
+    "lodash": "^4.17.21",
+    "react-helmet-async": "^1.3.0",
     "react-hot-toast": "^2.4.1",
-    "framer-motion": "^10.16.1",
-    "react-map-gl": "^7.1.3",
+    "recharts": "^2.8.0",
+    "react-map-gl": "^7.1.6",
     "mapbox-gl": "^2.15.0",
-    "@types/mapbox-gl": "^2.7.13",
     "react-dropzone": "^14.2.3",
     "react-image-crop": "^10.1.8",
-    "react-infinite-scroll-component": "^6.1.0",
-    "react-share": "^4.4.1",
-    "react-helmet-async": "^1.3.0",
-    "lodash": "^4.17.21",
-    "date-fns": "^2.30.0",
-    "react-spring": "^9.7.3",
-    "react-use-gesture": "^9.1.3",
-    "react-intersection-observer": "^9.5.2",
     "react-virtualized": "^9.22.5",
     "react-window": "^1.8.8",
-    "react-lazyload": "^3.2.0"
+    "react-intersection-observer": "^9.5.2",
+    "framer-motion": "^10.16.1",
+    "react-spring": "^9.7.3"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -68,10 +64,24 @@
     ]
   },
   "devDependencies": {
-    "@types/react": "^18.2.15",
-    "@types/react-dom": "^18.2.7",
-    "@types/lodash": "^4.14.195",
-    "typescript": "^5.1.6"
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "eslint": "^8.48.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0"
   },
-  "proxy": "http://localhost:3000"
+  "proxy": "http://localhost:3001",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "react",
+    "travel",
+    "social",
+    "web",
+    "dashboard"
+  ],
+  "author": "Travio Team",
+  "license": "MIT"
 }
